@@ -3,11 +3,11 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: dev-kafka
+  name: dev-broker-kafka
   labels:
     app.kubernetes.io/name: kafka
     helm.sh/chart: kafka-14.4.1
-    app.kubernetes.io/instance: dev-kafka
+    app.kubernetes.io/instance: dev-broker-kafka
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: kafka
 automountServiceAccountToken: true
@@ -16,35 +16,121 @@ automountServiceAccountToken: true
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: dev-kafka-scripts
+  name: dev-broker-kafka-scripts
   labels:
     app.kubernetes.io/name: kafka
     helm.sh/chart: kafka-14.4.1
-    app.kubernetes.io/instance: dev-kafka
+    app.kubernetes.io/instance: dev-broker-kafka
     app.kubernetes.io/managed-by: Helm
 data:
+  auto-discovery.sh: |-
+    #!/bin/bash
+
+    SVC_NAME="${MY_POD_NAME}-external"
+    # Auxiliary functions
+    retry_while() {
+        local -r cmd="${1:?cmd is missing}"
+        local -r retries="${2:-12}"
+        local -r sleep_time="${3:-5}"
+        local return_value=1
+
+        read -r -a command <<< "$cmd"
+        for ((i = 1 ; i <= retries ; i+=1 )); do
+            "${command[@]}" && return_value=0 && break
+            sleep "$sleep_time"
+        done
+        return $return_value
+    }
+    k8s_svc_lb_ip() {
+        local namespace=${1:?namespace is missing}
+        local service=${2:?service is missing}
+        local service_ip=$(kubectl get svc "$service" -n "$namespace" -o jsonpath="{.status.loadBalancer.ingress[0].ip}")
+        local service_hostname=$(kubectl get svc "$service" -n "$namespace" -o jsonpath="{.status.loadBalancer.ingress[0].hostname}")
+
+        if [[ -n ${service_ip} ]]; then
+            echo "${service_ip}"
+        else
+            echo "${service_hostname}"
+        fi
+    }
+    k8s_svc_lb_ip_ready() {
+        local namespace=${1:?namespace is missing}
+        local service=${2:?service is missing}
+        [[ -n "$(k8s_svc_lb_ip "$namespace" "$service")" ]]
+    }
+    # Wait until LoadBalancer IP is ready
+    retry_while "k8s_svc_lb_ip_ready dev-kafka $SVC_NAME" || exit 1
+    # Obtain LoadBalancer external IP
+    k8s_svc_lb_ip "dev-kafka" "$SVC_NAME" | tee "$SHARED_FILE"
   setup.sh: |-
     #!/bin/bash
 
-    ID="${MY_POD_NAME#"dev-kafka-"}"
+    ID="${MY_POD_NAME#"dev-broker-kafka-"}"
     if [[ -f "/bitnami/kafka/data/meta.properties" ]]; then
         export KAFKA_CFG_BROKER_ID="$(grep "broker.id" /bitnami/kafka/data/meta.properties | awk -F '=' '{print $2}')"
     else
         export KAFKA_CFG_BROKER_ID="$((ID + 0))"
     fi
+    # Configure external ip and port
+    export EXTERNAL_ACCESS_IP="$(<${SHARED_FILE})"
+    export EXTERNAL_ACCESS_PORT=19092
+
+    # Configure Kafka advertised listeners
+    export KAFKA_CFG_ADVERTISED_LISTENERS="INTERNAL://${MY_POD_NAME}.dev-broker-kafka-headless.dev-kafka.svc.cluster.local:9093,CLIENT://${MY_POD_NAME}.dev-broker-kafka-headless.dev-kafka.svc.cluster.local:9092,EXTERNAL://${EXTERNAL_ACCESS_IP}:${EXTERNAL_ACCESS_PORT}"
 
     exec /entrypoint.sh /run.sh
+---
+# Source: kafka/templates/role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dev-broker-kafka
+  labels:
+    app.kubernetes.io/name: kafka
+    helm.sh/chart: kafka-14.4.1
+    app.kubernetes.io/instance: dev-broker-kafka
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kafka
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+---
+# Source: kafka/templates/rolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dev-broker-kafka
+  labels:
+    app.kubernetes.io/name: kafka
+    helm.sh/chart: kafka-14.4.1
+    app.kubernetes.io/instance: dev-broker-kafka
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kafka
+roleRef:
+  kind: Role
+  name: dev-broker-kafka
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+  - kind: ServiceAccount
+    name: dev-broker-kafka
+    namespace: dev-kafka
 ---
 # Source: kafka/charts/zookeeper/templates/svc-headless.yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: dev-kafka-zookeeper-headless
+  name: dev-broker-kafka-zookeeper-headless
   namespace: dev-kafka
   labels:
     app.kubernetes.io/name: zookeeper
     helm.sh/chart: zookeeper-7.4.10
-    app.kubernetes.io/instance: dev-kafka
+    app.kubernetes.io/instance: dev-broker-kafka
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: zookeeper
 spec:
@@ -66,19 +152,19 @@ spec:
       targetPort: election
   selector:
     app.kubernetes.io/name: zookeeper
-    app.kubernetes.io/instance: dev-kafka
+    app.kubernetes.io/instance: dev-broker-kafka
     app.kubernetes.io/component: zookeeper
 ---
 # Source: kafka/charts/zookeeper/templates/svc.yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: dev-kafka-zookeeper
+  name: dev-broker-kafka-zookeeper
   namespace: dev-kafka
   labels:
     app.kubernetes.io/name: zookeeper
     helm.sh/chart: zookeeper-7.4.10
-    app.kubernetes.io/instance: dev-kafka
+    app.kubernetes.io/instance: dev-broker-kafka
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: zookeeper
 spec:
@@ -99,18 +185,43 @@ spec:
       targetPort: election
   selector:
     app.kubernetes.io/name: zookeeper
-    app.kubernetes.io/instance: dev-kafka
+    app.kubernetes.io/instance: dev-broker-kafka
     app.kubernetes.io/component: zookeeper
+---
+# Source: kafka/templates/svc-external-access.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: dev-broker-kafka-0-external
+  labels:
+    app.kubernetes.io/name: kafka
+    helm.sh/chart: kafka-14.4.1
+    app.kubernetes.io/instance: dev-broker-kafka
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: kafka
+    pod: dev-broker-kafka-0
+spec:
+  type: LoadBalancer
+  ports:
+    - name: tcp-kafka
+      port: 19092
+      nodePort: null
+      targetPort: kafka-external
+  selector:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/instance: dev-broker-kafka
+    app.kubernetes.io/component: kafka
+    statefulset.kubernetes.io/pod-name: dev-broker-kafka-0
 ---
 # Source: kafka/templates/svc-headless.yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: dev-kafka-headless
+  name: dev-broker-kafka-headless
   labels:
     app.kubernetes.io/name: kafka
     helm.sh/chart: kafka-14.4.1
-    app.kubernetes.io/instance: dev-kafka
+    app.kubernetes.io/instance: dev-broker-kafka
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: kafka
 spec:
@@ -127,18 +238,18 @@ spec:
       targetPort: kafka-internal
   selector:
     app.kubernetes.io/name: kafka
-    app.kubernetes.io/instance: dev-kafka
+    app.kubernetes.io/instance: dev-broker-kafka
     app.kubernetes.io/component: kafka
 ---
 # Source: kafka/templates/svc.yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: dev-kafka
+  name: dev-broker-kafka
   labels:
     app.kubernetes.io/name: kafka
     helm.sh/chart: kafka-14.4.1
-    app.kubernetes.io/instance: dev-kafka
+    app.kubernetes.io/instance: dev-broker-kafka
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: kafka
 spec:
@@ -151,24 +262,24 @@ spec:
       nodePort: null
   selector:
     app.kubernetes.io/name: kafka
-    app.kubernetes.io/instance: dev-kafka
+    app.kubernetes.io/instance: dev-broker-kafka
     app.kubernetes.io/component: kafka
 ---
 # Source: kafka/charts/zookeeper/templates/statefulset.yaml
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: dev-kafka-zookeeper
+  name: dev-broker-kafka-zookeeper
   namespace: dev-kafka
   labels:
     app.kubernetes.io/name: zookeeper
     helm.sh/chart: zookeeper-7.4.10
-    app.kubernetes.io/instance: dev-kafka
+    app.kubernetes.io/instance: dev-broker-kafka
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: zookeeper
     role: zookeeper
 spec:
-  serviceName: dev-kafka-zookeeper-headless
+  serviceName: dev-broker-kafka-zookeeper-headless
   replicas: 1
   podManagementPolicy: Parallel
   updateStrategy:
@@ -176,15 +287,15 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: zookeeper
-      app.kubernetes.io/instance: dev-kafka
+      app.kubernetes.io/instance: dev-broker-kafka
       app.kubernetes.io/component: zookeeper
   template:
     metadata:
-      name: dev-kafka-zookeeper
+      name: dev-broker-kafka-zookeeper
       labels:
         app.kubernetes.io/name: zookeeper
         helm.sh/chart: zookeeper-7.4.10
-        app.kubernetes.io/instance: dev-kafka
+        app.kubernetes.io/instance: dev-broker-kafka
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/component: zookeeper
     spec:
@@ -201,7 +312,7 @@ spec:
                 labelSelector:
                   matchLabels:
                     app.kubernetes.io/name: zookeeper
-                    app.kubernetes.io/instance: dev-kafka
+                    app.kubernetes.io/instance: dev-broker-kafka
                     app.kubernetes.io/component: zookeeper
                 namespaces:
                   - "dev-kafka"
@@ -269,7 +380,7 @@ spec:
             - name: ZOO_MAX_SESSION_TIMEOUT
               value: "40000"
             - name: ZOO_SERVERS
-              value: dev-kafka-zookeeper-0.dev-kafka-zookeeper-headless.dev-kafka.svc.cluster.local:2888:3888::1 
+              value: dev-broker-kafka-zookeeper-0.dev-broker-kafka-zookeeper-headless.dev-kafka.svc.cluster.local:2888:3888::1 
             - name: ZOO_ENABLE_AUTH
               value: "no"
             - name: ZOO_HEAP_SIZE
@@ -325,11 +436,11 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: dev-kafka
+  name: dev-broker-kafka
   labels:
     app.kubernetes.io/name: kafka
     helm.sh/chart: kafka-14.4.1
-    app.kubernetes.io/instance: dev-kafka
+    app.kubernetes.io/instance: dev-broker-kafka
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/component: kafka
 spec:
@@ -338,9 +449,9 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: kafka
-      app.kubernetes.io/instance: dev-kafka
+      app.kubernetes.io/instance: dev-broker-kafka
       app.kubernetes.io/component: kafka
-  serviceName: dev-kafka-headless
+  serviceName: dev-broker-kafka-headless
   updateStrategy:
     type: "RollingUpdate"
   template:
@@ -348,9 +459,11 @@ spec:
       labels:
         app.kubernetes.io/name: kafka
         helm.sh/chart: kafka-14.4.1
-        app.kubernetes.io/instance: dev-kafka
+        app.kubernetes.io/instance: dev-broker-kafka
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/component: kafka
+      annotations:
+        checksum/scripts: 0f4c439dc06cd42f0ff4fc91f299299cb6b408786a7588ee93834e7ac494bb23
     spec:
       
       affinity:
@@ -362,7 +475,7 @@ spec:
                 labelSelector:
                   matchLabels:
                     app.kubernetes.io/name: kafka
-                    app.kubernetes.io/instance: dev-kafka
+                    app.kubernetes.io/instance: dev-broker-kafka
                     app.kubernetes.io/component: kafka
                 namespaces:
                   - "dev-kafka"
@@ -373,7 +486,31 @@ spec:
       securityContext:
         fsGroup: 1001
         runAsUser: 1001
-      serviceAccountName: dev-kafka
+      serviceAccountName: dev-broker-kafka
+      initContainers:
+        - name: auto-discovery
+          image: docker.io/bitnami/kubectl:1.19.15-debian-10-r39
+          imagePullPolicy: "IfNotPresent"
+          command:
+            - /scripts/auto-discovery.sh
+          env:
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SHARED_FILE
+              value: "/shared/info.txt"
+          resources:
+            limits: {}
+            requests: {}
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+            - name: logs
+              mountPath: /opt/bitnami/kafka/logs
+            - name: scripts
+              mountPath: /scripts/auto-discovery.sh
+              subPath: auto-discovery.sh
       containers:
         - name: kafka
           image: docker.io/bitnami/kafka:2.8.1-debian-10-r31
@@ -392,15 +529,15 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: KAFKA_CFG_ZOOKEEPER_CONNECT
-              value: "dev-kafka-zookeeper"
+              value: "dev-broker-kafka-zookeeper"
             - name: KAFKA_INTER_BROKER_LISTENER_NAME
               value: "INTERNAL"
             - name: KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP
-              value: "INTERNAL:PLAINTEXT,CLIENT:PLAINTEXT"
+              value: "INTERNAL:PLAINTEXT,CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT"
             - name: KAFKA_CFG_LISTENERS
-              value: "INTERNAL://:9093,CLIENT://:9092"
-            - name: KAFKA_CFG_ADVERTISED_LISTENERS
-              value: "INTERNAL://$(MY_POD_NAME).dev-kafka-headless.dev-kafka.svc.cluster.local:9093,CLIENT://$(MY_POD_NAME).dev-kafka-headless.dev-kafka.svc.cluster.local:9092"
+              value: "INTERNAL://:9093,CLIENT://:9092,EXTERNAL://:9094"
+            - name: SHARED_FILE
+              value: "/shared/info.txt"
             - name: ALLOW_PLAINTEXT_LISTENER
               value: "yes"
             - name: KAFKA_VOLUME_DIR
@@ -464,6 +601,8 @@ spec:
               containerPort: 9092
             - name: kafka-internal
               containerPort: 9093
+            - name: kafka-external
+              containerPort: 9094
           livenessProbe:
             tcpSocket:
               port: kafka-client
@@ -491,11 +630,15 @@ spec:
             - name: scripts
               mountPath: /scripts/setup.sh
               subPath: setup.sh
+            - name: shared
+              mountPath: /shared
       volumes:
         - name: scripts
           configMap:
-            name: dev-kafka-scripts
+            name: dev-broker-kafka-scripts
             defaultMode: 0755
+        - name: shared
+          emptyDir: {}
         - name: logs
           emptyDir: {}
   volumeClaimTemplates:
