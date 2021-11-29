@@ -1,0 +1,34 @@
+apiVersion: "kafka.strimzi.io/v1beta2"
+kind: "KafkaConnector"
+metadata:
+  # connector name
+  name: "service-order-event-source"
+  namespace: ingestion
+  labels:
+    # kafka connect [cluster] name
+    strimzi.io/cluster: my-cluster
+  
+spec:
+  class: io.confluent.connect.jdbc.JdbcSourceConnector
+  tasksMax: 1
+  config:
+    key.converter: org.apache.kafka.connect.storage.StringConverter
+    value.converter: org.apache.kafka.connect.json.JsonConverter
+    transforms: createKey, extractInt
+    transforms.createKey.type: org.apache.kafka.connect.transforms.ValueToKey
+    transforms.createKey.fields: cdManutOficina
+    transforms.extractInt.type: org.apache.kafka.connect.transforms.ExtractField$Key
+    transforms.extractInt.field: cdManutOficina
+    connection.url: jdbc:jtds:sybase://172.29.223.122:4400/fuel
+    connection.user: kafka_eventos_os
+    connection.password: good#123
+    dialect.name: SybaseDatabaseDialect
+    mode: timestamp
+    timestamp.column.name: dhCadastro
+    query: Select tb_1.* From(Select cd_manutencao_oficina_hist cdManutOficinaHist, cd_manutencao_oficina cdManutOficina, cd_evento_manutencao_oficina cdEventoManutencao, cd_manutencao_oficina_status cdManutOficinaStatus, dh_cadastro dhCadastro, cd_usuario_web_estabelecimento cdUsuarioWebEc, cd_usuario_web_cliente cdUsuarioWebCli,  cd_cliente cdCliente, cd_veiculo_cliente cdVeiculoCliente From MANUTENCAO_OFICINA_HIST_FILA) as tb_1 
+    poll.interval.ms: 6000
+    batch.max.rows: 1
+    topic.prefix: service-order-events
+    timestamp.delay.interval.ms: 2500
+    key.converter.schemas.enable: false
+    value.converter.schemas.enable: false
