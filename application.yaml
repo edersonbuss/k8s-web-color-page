@@ -47,10 +47,10 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: dev-kafka
-  namespace: ingestion
+  namespace: dev-argo-cd
 spec:
   destination:
-    namespace: ingestion
+    namespace: dev-argo-cd
     server: https://kubernetes.default.svc
   project: default
   source:
