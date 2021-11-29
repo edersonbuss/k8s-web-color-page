@@ -2,7 +2,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: web-color-homolog
-  namespace: dev-argo-cd
+  namespace: ingestion
 spec:
   destination:
     namespace: web-color-homolog
@@ -24,7 +24,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: web-color-prod
-  namespace: dev-argo-cd
+  namespace: ingestion
 spec:
   destination:
     namespace: web-color-prod
