@@ -47,14 +47,14 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: dev-kafka
-  namespace: dev-argo-cd
+  namespace: ingestion
 spec:
   destination:
-    namespace: dev-argo-cd
+    namespace: ingestion
     server: https://kubernetes.default.svc
   project: default
   source:
-    path: kafka
+    path: kafka_strimzi
     repoURL: https://github.com/edersonbuss/k8s-web-color-page.git
     targetRevision: HEAD
 
